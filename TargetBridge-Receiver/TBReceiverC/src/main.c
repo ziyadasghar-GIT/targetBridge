@@ -948,10 +948,7 @@ static void tb_receiver_apply_input_control_mode(struct app *a, const uint8_t *p
 
 /* ---- Callbacks: decoder → display ------------------------------------ */
 
-static void on_frame(const uint8_t *y, int y_stride,
-                     const uint8_t *uv, int uv_stride,
-                     int w, int h, void *ud) {
-    struct app *a = (struct app *)ud;
+static void on_frame_received(struct app *a, int w, int h) {
     a->have_video_frame = 1;
     tb_copy_i18n(a->status_text, sizeof(a->status_text), "receiver.status.stream_active");
     {
@@ -965,7 +962,6 @@ static void on_frame(const uint8_t *y, int y_stride,
         snprintf(height_text, sizeof(height_text), "%d", h);
         tb_format_i18n(a->mode_text, sizeof(a->mode_text), "receiver.mode.receiving", pairs, 2);
     }
-    tb_disp_render_nv12(a->disp, y, y_stride, uv, uv_stride, w, h);
     a->frames++;
 }
 
@@ -989,19 +985,35 @@ static void drop_pending_frame(struct app *a) {
     }
 }
 
-/* Upload + present the newest decoded frame, if any. Called once per main
- * loop iteration, after the socket has been drained. */
+static void on_frame(const uint8_t *y, int y_stride,
+                     const uint8_t *uv, int uv_stride,
+                     int w, int h, void *ud) {
+    struct app *a = (struct app *)ud;
+    on_frame_received(a, w, h);
+    tb_disp_render_nv12(a->disp, y, y_stride, uv, uv_stride, w, h);
+}
+
+/* Present the newest decoded frame, if any. Called once per main loop
+ * iteration, after the socket has been drained. Tries the zero-copy native
+ * Metal path first (PR #174); it retains the buffer for as long as the GPU
+ * needs it. Falls back to the CPU-plane OpenGL upload when Metal is disabled
+ * or has failed. */
 static void present_pending_frame(struct app *a) {
     CVPixelBufferRef pb = a->pending_pixbuf;
     if (!pb) return;
     a->pending_pixbuf = NULL;
+    int w = (int)CVPixelBufferGetWidth(pb);
+    int h = (int)CVPixelBufferGetHeight(pb);
+    if (w > 0 && h > 0 && tb_disp_render_native_nv12(a->disp, (void *)pb, w, h)) {
+        on_frame_received(a, w, h);
+        CVPixelBufferRelease(pb);
+        return;
+    }
     if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == 0) {
         const uint8_t *y  = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pb, 0);
         size_t         ys =                  CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
         const uint8_t *uv = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pb, 1);
         size_t         us =                  CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
-        int w = (int)CVPixelBufferGetWidth(pb);
-        int h = (int)CVPixelBufferGetHeight(pb);
         if (y && uv && w > 0 && h > 0) {
             on_frame(y, (int)ys, uv, (int)us, w, h, a);
         }
