@@ -589,8 +589,22 @@ static SDL_Renderer *tb_disp_try_renderer(SDL_Window *win, const char *driver) {
     return ren;
 }
 
+/* Renderer request. Unset defaults to "auto" on macOS: native zero-copy Metal
+ * is validated on the first real frames and the receiver falls back to the
+ * SDL/OpenGL upload if it underperforms. TB_RECEIVER_RENDER_DRIVER=opengl
+ * restores the previous behaviour. */
+static const char *tb_disp_requested_driver(void) {
+    const char *env = getenv("TB_RECEIVER_RENDER_DRIVER");
+    if (env && env[0] != '\0') return env;
+#if defined(__APPLE__)
+    return "auto";
+#else
+    return NULL;
+#endif
+}
+
 static SDL_Renderer *tb_disp_create_accelerated_renderer(SDL_Window *win) {
-    const char *forced_driver = getenv("TB_RECEIVER_RENDER_DRIVER");
+    const char *forced_driver = tb_disp_requested_driver();
     if (forced_driver && forced_driver[0] != '\0') {
         fprintf(stderr, "[disp] renderer override = %s\n", forced_driver);
         /* The native path owns only the video overlay. SDL/OpenGL remains
@@ -658,7 +672,7 @@ struct tb_display *tb_disp_create(int fullscreen) {
         fprintf(stderr, "[disp] renderer = %s\n", info.name);
     }
 #if defined(__APPLE__)
-    const char *forced_driver = getenv("TB_RECEIVER_RENDER_DRIVER");
+    const char *forced_driver = tb_disp_requested_driver();
     const int native_forced = forced_driver &&
         (strcasecmp(forced_driver, "metal-native") == 0 ||
          strcasecmp(forced_driver, "native-metal") == 0);
